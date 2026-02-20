@@ -2,12 +2,14 @@
 Multi-omics data preprocessing for fungal pathogenicity prediction.
 
 Handles loading and normalising genomics, transcriptomics, and proteomics data
-from CSV files and produces aligned sample matrices ready for graph construction.
+from CSV files or a local SQLite database, and produces aligned sample matrices
+ready for graph construction.
 """
 
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Individual omics loaders
+# Individual omics loaders (CSV)
 # ---------------------------------------------------------------------------
 
 
@@ -65,6 +67,125 @@ def load_labels(path: str | Path) -> pd.Series:
     labels = df.iloc[:, 0].astype(int)
     logger.info(
         "Loaded labels: %d samples (%d pathogenic, %d non-pathogenic)",
+        len(labels),
+        labels.sum(),
+        (labels == 0).sum(),
+    )
+    return labels
+
+
+# ---------------------------------------------------------------------------
+# Database loaders (SQLite)
+# ---------------------------------------------------------------------------
+
+
+def load_from_database(
+    db_path: str | Path,
+    table_name: str,
+    index_col: str = "sample_id",
+) -> pd.DataFrame:
+    """Load a table from a local SQLite database into a DataFrame.
+
+    Parameters
+    ----------
+    db_path:
+        Path to the SQLite database file.
+    table_name:
+        Name of the table to read.
+    index_col:
+        Column to use as the DataFrame index (default ``"sample_id"``).
+
+    Returns
+    -------
+    pd.DataFrame
+        Data with *index_col* set as the index.  All remaining columns are
+        cast to numeric where possible; non-numeric columns are dropped with
+        a warning.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database file not found: {db_path}")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        df = pd.read_sql(f"SELECT * FROM [{table_name}]", conn)
+    finally:
+        conn.close()
+
+    if index_col not in df.columns:
+        raise ValueError(
+            f"Index column '{index_col}' not found in table '{table_name}'. "
+            f"Available columns: {list(df.columns)}"
+        )
+    df = df.set_index(index_col)
+
+    # Cast columns to numeric; drop any that cannot be converted
+    numeric_df = df.apply(pd.to_numeric, errors="coerce")
+    non_numeric = numeric_df.columns[numeric_df.isna().all()]
+    if len(non_numeric) > 0:
+        logger.warning(
+            "Dropped %d non-numeric columns from table '%s': %s",
+            len(non_numeric),
+            table_name,
+            list(non_numeric),
+        )
+        numeric_df = numeric_df.drop(columns=non_numeric)
+
+    logger.info(
+        "Loaded table '%s' from database: %s samples, %s features",
+        table_name,
+        *numeric_df.shape,
+    )
+    return numeric_df
+
+
+def load_labels_from_database(
+    db_path: str | Path,
+    table_name: str = "labels",
+    index_col: str = "sample_id",
+    label_col: str = "label",
+) -> pd.Series:
+    """Load binary pathogenicity labels from a local SQLite database.
+
+    Parameters
+    ----------
+    db_path:
+        Path to the SQLite database file.
+    table_name:
+        Name of the labels table (default ``"labels"``).
+    index_col:
+        Column to use as the sample index (default ``"sample_id"``).
+    label_col:
+        Name of the column containing the binary labels (default ``"label"``).
+
+    Returns
+    -------
+    pd.Series
+        Integer label series with sample IDs as the index.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database file not found: {db_path}")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        df = pd.read_sql(f"SELECT * FROM [{table_name}]", conn)
+    finally:
+        conn.close()
+
+    if index_col not in df.columns:
+        raise ValueError(
+            f"Index column '{index_col}' not found in table '{table_name}'."
+        )
+    if label_col not in df.columns:
+        raise ValueError(
+            f"Label column '{label_col}' not found in table '{table_name}'."
+        )
+
+    df = df.set_index(index_col)
+    labels = df[label_col].astype(int)
+    logger.info(
+        "Loaded labels from database: %d samples (%d pathogenic, %d non-pathogenic)",
         len(labels),
         labels.sum(),
         (labels == 0).sum(),

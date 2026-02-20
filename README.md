@@ -10,11 +10,8 @@
 2. [Repository Structure](#repository-structure)
 3. [Setup](#setup)
 4. [Data Format](#data-format)
-5. [Quick Start](#quick-start)
-6. [3-Month Project Roadmap](#3-month-project-roadmap)
-   - [Month 1 – Data Collection & Preprocessing](#month-1--data-collection--preprocessing)
-   - [Month 2 – Model Development](#month-2--model-development)
-   - [Month 3 – Evaluation, Analysis & Deployment](#month-3--evaluation-analysis--deployment)
+5. [Pipeline Architecture](#pipeline-architecture)
+6. [Quick Start](#quick-start)
 7. [Module Reference](#module-reference)
 8. [Running Tests](#running-tests)
 9. [Configuration](#configuration)
@@ -24,9 +21,9 @@
 
 ## Project Overview
 
-This project builds a machine learning pipeline to predict whether a fungal
-species (or strain) is pathogenic based on multi-omics evidence.  The three
-omics layers are:
+This project provides an end-to-end machine learning pipeline for predicting
+whether a fungal species (or strain) is pathogenic based on multi-omics
+evidence.  It integrates three complementary data layers:
 
 | Layer           | Data type                              | Example sources                            |
 |-----------------|----------------------------------------|--------------------------------------------|
@@ -95,6 +92,11 @@ pip install -r requirements.txt
 
 ## Data Format
 
+The pipeline supports two data sources: **CSV files** and a **local SQLite
+database**.
+
+### Option A – CSV files
+
 Place CSV files in `data/raw/` with the following format:
 
 | File                     | Rows          | Columns                | Values              |
@@ -107,13 +109,93 @@ Place CSV files in `data/raw/` with the following format:
 The first column of every file is used as the sample index.  Only samples
 present in **all four** files are used.
 
+### Option B – SQLite database
+
+Place a SQLite database file (e.g. `data/raw/omics.db`) containing the
+following tables:
+
+| Table              | Required columns                                     |
+|--------------------|------------------------------------------------------|
+| `genomics`         | `sample_id` + one column per genomic feature         |
+| `transcriptomics`  | `sample_id` + one column per gene expression feature |
+| `proteomics`       | `sample_id` + one column per protein feature         |
+| `labels`           | `sample_id`, `label` (0 or 1)                        |
+
+All tables use `sample_id` as the sample identifier.  Non-numeric columns
+(other than `sample_id`) are automatically dropped during loading.  Enable
+database loading by setting `data.database.enabled: true` in
+`configs/config.yaml`.
+
+---
+
+## Pipeline Architecture
+
+The pipeline is composed of five stages that transform raw omics data into
+pathogenicity predictions:
+
+### 1. Data Ingestion
+
+Raw multi-omics data is loaded from **CSV files** or a **local SQLite
+database**.  Each omics modality (genomics, transcriptomics, proteomics)
+and the pathogenicity labels are loaded into pandas DataFrames.
+
+### 2. Preprocessing
+
+The `MultiOmicsPreprocessor` class applies the following steps:
+
+1. **Sample alignment** – Restrict all modalities to their common sample set.
+2. **Log transformation** – Apply `log(x + 1)` to count-based data
+   (transcriptomics and proteomics) to stabilise variance.
+3. **Low-variance filtering** – Remove near-constant features that carry
+   little discriminative signal.
+4. **Top-k feature selection** – Retain the *k* features with the highest
+   variance per modality to keep the model tractable.
+5. **Z-score normalisation** – Standardise each feature to zero mean and unit
+   variance.
+
+### 3. Graph Construction
+
+Processed omics matrices are converted into a `torch_geometric.data.Data`
+graph:
+
+- **Node features** – Each node represents a fungal sample; its feature
+  vector is the concatenation of all omics modalities.
+- **Intra-omics edges** – Pairs of samples with cosine similarity above a
+  configurable threshold within each omics layer.
+- **Inter-omics edges** – Cross-layer edges connecting samples that are
+  similar across different omics modalities.
+
+### 4. Model Training
+
+Three model architectures are available:
+
+| Model                   | Description                                                        |
+|-------------------------|--------------------------------------------------------------------|
+| `GCNPathogenicityModel` | Graph Convolutional Network baseline                               |
+| `GATPathogenicityModel` | Graph Attention Network with multi-head attention (recommended)    |
+| `MultiOmicsGNNModel`    | Per-modality encoders with attention-based fusion + GAT layers     |
+
+Training uses cross-entropy loss with early stopping on a validation set.
+The best checkpoint is automatically saved.
+
+### 5. Evaluation
+
+The held-out test set is evaluated using the following metrics:
+
+- **Accuracy**
+- **AUROC** (Area Under the Receiver Operating Characteristic)
+- **AUPRC** (Area Under the Precision-Recall Curve)
+- **F1 Score**
+- **MCC** (Matthews Correlation Coefficient)
+
 ---
 
 ## Quick Start
 
+### Using CSV files
+
 ```python
 import yaml
-import pandas as pd
 from src.data.preprocessing import (
     MultiOmicsPreprocessor, load_genomics, load_transcriptomics,
     load_proteomics, load_labels,
@@ -127,7 +209,7 @@ from src.evaluation.metrics import evaluate
 with open("configs/config.yaml") as f:
     cfg = yaml.safe_load(f)
 
-# 2. Load raw data
+# 2. Load raw data from CSV files
 genomics       = load_genomics("data/raw/genomics.csv")
 transcriptomics = load_transcriptomics("data/raw/transcriptomics.csv")
 proteomics     = load_proteomics("data/raw/proteomics.csv")
@@ -187,172 +269,26 @@ metrics = evaluate(model, graph, test_mask, multiomics_splits=omics_splits)
 print(metrics)
 ```
 
----
+### Using a local SQLite database
 
-## 3-Month Project Roadmap
+```python
+from src.data.preprocessing import (
+    MultiOmicsPreprocessor, load_from_database, load_labels_from_database,
+)
 
-The roadmap below breaks the project into weekly milestones spread across
-three months.  Each week has concrete deliverables and the code in this
-repository that supports them.
+# Load data from a local SQLite database
+db_path = "data/raw/omics.db"
+genomics       = load_from_database(db_path, "genomics")
+transcriptomics = load_from_database(db_path, "transcriptomics")
+proteomics     = load_from_database(db_path, "proteomics")
+labels         = load_labels_from_database(db_path)
 
----
-
-### Month 1 – Data Collection & Preprocessing
-
-**Goal**: Assemble and clean a high-quality multi-omics dataset of fungal
-strains with known pathogenicity phenotypes.
-
-#### Week 1 – Literature & database survey
-
-| Task | Detail |
-|------|--------|
-| Identify target fungi | Select 5–10 well-studied pathogenic species (e.g. *Candida albicans*, *Aspergillus fumigatus*, *Fusarium oxysporum*) and matched non-pathogenic relatives |
-| Survey databases | PHI-base (pathogen–host interactions), FungiDB, NCBI GenBank, UniProt, GEO/ArrayExpress |
-| Define phenotype labels | Binary label: 1 = confirmed pathogen, 0 = non-pathogen; record evidence type |
-| Create `labels.csv` | One row per sample/strain, column `label` |
-
-**Deliverable**: A curated list of fungal strains with confirmed pathogenicity
-labels stored in `data/raw/labels.csv`.
-
-#### Week 2 – Genomics data collection
-
-| Task | Detail |
-|------|--------|
-| Download genome assemblies | Use NCBI Datasets or FungiDB bulk download |
-| Call virulence-factor genes | Align against PHI-base gene set (BLAST or HMMER) |
-| Build presence/absence matrix | Rows = strains, columns = virulence-associated genes |
-| Save as `data/raw/genomics.csv` | Binary or normalised copy-number values |
-
-**Tip**: Limit to known secretome, effector, and CAZyme gene families to keep
-the feature space tractable (< 2 000 features initially).
-
-#### Week 3 – Transcriptomics & Proteomics collection
-
-| Task | Detail |
-|------|--------|
-| Download RNA-seq datasets | Search GEO with `fungus AND pathogenicity AND RNA-seq` |
-| Normalise counts | Use TPM or DESeq2 size-factor normalisation |
-| Download proteomics datasets | PRIDE archive; focus on secretome/effector studies |
-| Align sample IDs | Ensure the same strain identifiers are used across all three CSV files |
-
-**Tip**: Use a minimum of 50 samples per class to avoid severe class imbalance.
-
-#### Week 4 – Data preprocessing
-
-| Task | Code | Detail |
-|------|------|--------|
-| Run `MultiOmicsPreprocessor` | `src/data/preprocessing.py` | Remove low-variance features, log-transform count data, z-score normalise |
-| Inspect distributions | `notebooks/exploratory_analysis.ipynb` | PCA, UMAP, class-balance checks |
-| Handle missing values | Edit `preprocessing.py` if needed | Impute or drop samples |
-| Save processed arrays | `data/processed/` | `.npy` files consumed by graph builder |
-
-**Deliverable**: Cleaned, aligned numpy arrays for all three omics layers,
-saved in `data/processed/`.
-
----
-
-### Month 2 – Model Development
-
-**Goal**: Build, train, and iteratively improve a graph-based deep learning
-model.
-
-#### Week 5 – Graph construction
-
-| Task | Code | Detail |
-|------|------|--------|
-| Tune similarity threshold | `src/data/graph_construction.py` | Try `intra_threshold` values in {0.5, 0.6, 0.7, 0.8}; aim for ~5–20 edges per node |
-| Visualise graph | `networkx` + `matplotlib` | Check connectivity; isolated nodes indicate threshold too high |
-| Add biological priors | Optional: add pathway-based edges from KEGG/GO enrichment | Can replace or supplement correlation-based edges |
-
-**Deliverable**: A `torch_geometric.data.Data` object with sensible
-connectivity and node-feature dimensions.
-
-#### Week 6 – Baseline models
-
-| Task | Code | Detail |
-|------|------|--------|
-| Train GCN baseline | `src/models/gnn.py` → `GCNPathogenicityModel` | 2–3 layers, hidden=64 |
-| Train GAT model | `src/models/gnn.py` → `GATPathogenicityModel` | 3 layers, heads=4, hidden=64 |
-| Log metrics | `src/evaluation/metrics.py` | Record AUROC, AUPRC, F1, MCC on validation set |
-| Compare to non-graph baseline | `sklearn` Random Forest on concatenated features | Provides a sanity-check lower bound |
-
-**Deliverable**: Baseline performance numbers for GCN, GAT, and Random Forest.
-
-#### Week 7 – Multi-omics GNN
-
-| Task | Code | Detail |
-|------|------|--------|
-| Train `MultiOmicsGNNModel` | `src/models/multiomics_gnn.py` | Per-modality encoders + attention-based fusion |
-| Ablation: single-omics | Remove 2 of 3 layers; retrain | Quantifies each layer's contribution |
-| Ablation: no inter-omics edges | Set `include_inter_omics=False` | Quantifies cross-layer edges |
-| Record all results | Table in notebook | Compare to baselines from Week 6 |
-
-**Deliverable**: Trained `MultiOmicsGNNModel` weights in `checkpoints/`.
-
-#### Week 8 – Hyperparameter tuning
-
-| Task | Detail |
-|------|--------|
-| Grid search or random search | Vary `hidden_channels` {64,128,256}, `num_layers` {2,3,4}, `heads` {2,4,8}, `dropout` {0.2,0.3,0.5} |
-| Update `configs/config.yaml` | Record best hyperparameter set |
-| Re-train best configuration | Save final model checkpoint |
-
-**Deliverable**: Best hyperparameter configuration and corresponding validation
-AUROC.
-
----
-
-### Month 3 – Evaluation, Analysis & Deployment
-
-**Goal**: Rigorous test-set evaluation, biological interpretation, and a
-reusable inference interface.
-
-#### Week 9 – Test-set evaluation
-
-| Task | Code | Detail |
-|------|------|--------|
-| Evaluate best model on held-out test set | `src/evaluation/metrics.py` | Report accuracy, AUROC, AUPRC, F1, MCC |
-| Confidence intervals | Bootstrap (1 000 resamples) | Assess statistical reliability |
-| Confusion matrix | `sklearn.metrics.ConfusionMatrixDisplay` | Understand false positive/negative patterns |
-
-**Deliverable**: Final test-set performance table with confidence intervals.
-
-#### Week 10 – Biological interpretation
-
-| Task | Detail |
-|------|--------|
-| Extract GAT attention weights | `return_attention_weights=True` in `GATConv` forward call |
-| Identify high-attention edges | Pairs of samples with consistently high attention across heads |
-| Map top genomic features | Use variance ranking from `select_top_k_features` to map back to gene names |
-| Pathway enrichment | Run top features through FungiDB or KEGG pathway tools |
-
-**Deliverable**: List of candidate pathogenicity-associated genes/pathways
-ranked by model attention, ready for wet-lab validation.
-
-#### Week 11 – Robustness checks
-
-| Task | Detail |
-|------|--------|
-| Cross-validation (5-fold) | Re-run training on 5 folds; report mean ± std AUROC |
-| Leave-species-out | Hold out all strains of one species; tests generalisation to unseen fungi |
-| Noise injection | Add Gaussian noise to features; assess degradation |
-| Class imbalance | If imbalanced, try weighted `CrossEntropyLoss` or SMOTE |
-
-**Deliverable**: Cross-validation results table; updated model if robustness
-issues found.
-
-#### Week 12 – Documentation & deployment
-
-| Task | Detail |
-|------|--------|
-| Write inference script | `predict.py` – takes new sample CSVs, returns pathogenicity probability |
-| Write `requirements.txt` | Already present; pin exact versions for reproducibility |
-| Finalise `configs/config.yaml` | Document every parameter |
-| Write unit tests | Already present in `tests/`; add any missing edge cases |
-| Update this README | Add results table, citation, acknowledgements |
-
-**Deliverable**: A fully documented, tested, and runnable codebase suitable
-for sharing with collaborators or as a supplementary to a publication.
+# The rest of the pipeline is identical – preprocess, build graph, train, evaluate
+preprocessor = MultiOmicsPreprocessor(top_k_features=500)
+omics_matrices, y = preprocessor.fit_transform(
+    genomics, transcriptomics, proteomics, labels
+)
+```
 
 ---
 
@@ -366,6 +302,8 @@ for sharing with collaborators or as a supplementary to a publication.
 | `load_transcriptomics(path)` | Load transcriptomics CSV → `pd.DataFrame` |
 | `load_proteomics(path)` | Load proteomics CSV → `pd.DataFrame` |
 | `load_labels(path)` | Load label CSV → `pd.Series` |
+| `load_from_database(db_path, table_name, index_col)` | Load a table from a SQLite database → `pd.DataFrame` |
+| `load_labels_from_database(db_path, table_name, index_col, label_col)` | Load labels from a SQLite database → `pd.Series` |
 | `align_samples(*dfs)` | Restrict all DataFrames to common sample index |
 | `remove_low_variance_features(df, threshold)` | Drop near-constant features |
 | `select_top_k_features(df, k)` | Keep top-k by variance |
@@ -423,7 +361,10 @@ pytest tests/ -v
 All tuneable parameters live in `configs/config.yaml`.  The file is
 self-documenting; key sections are:
 
-- **data** – file paths, train/val/test split sizes, random seed
+- **data** – file paths, train/val/test split sizes, random seed, and optional
+  database configuration
+- **data.database** – SQLite database path, table names, and column mappings
+  (set `enabled: true` to use database loading)
 - **graph** – similarity thresholds, top-k feature count
 - **model** – hidden channels, number of layers, attention heads, dropout
 - **training** – epochs, learning rate, early-stopping patience

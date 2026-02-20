@@ -2,6 +2,8 @@
 Tests for the multi-omics preprocessing module.
 """
 
+import sqlite3
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,7 +11,9 @@ import pytest
 from src.data.preprocessing import (
     MultiOmicsPreprocessor,
     align_samples,
+    load_from_database,
     load_labels,
+    load_labels_from_database,
     log_transform,
     normalise,
     remove_low_variance_features,
@@ -163,3 +167,111 @@ class TestMultiOmicsPreprocessor:
         for name in matrices:
             np.testing.assert_array_equal(matrices[name], loaded_matrices[name])
         np.testing.assert_array_equal(y, loaded_y)
+
+
+# ---------------------------------------------------------------------------
+# Database loading tests
+# ---------------------------------------------------------------------------
+
+
+def _create_test_db(db_path, n_samples=20, n_features=10, seed=0):
+    """Create a test SQLite database with omics tables and labels."""
+    rng = np.random.default_rng(seed)
+    conn = sqlite3.connect(str(db_path))
+
+    for table_name in ("genomics", "transcriptomics", "proteomics"):
+        data = rng.random((n_samples, n_features))
+        cols = [f"feat_{j}" for j in range(n_features)]
+        df = pd.DataFrame(data, columns=cols)
+        df.insert(0, "sample_id", [f"sample_{i}" for i in range(n_samples)])
+        df.to_sql(table_name, conn, index=False, if_exists="replace")
+
+    labels_df = pd.DataFrame(
+        {
+            "sample_id": [f"sample_{i}" for i in range(n_samples)],
+            "label": rng.integers(0, 2, size=n_samples),
+        }
+    )
+    labels_df.to_sql("labels", conn, index=False, if_exists="replace")
+    conn.close()
+
+
+class TestLoadFromDatabase:
+    def test_basic_load(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _create_test_db(db_path, n_samples=15, n_features=8)
+        df = load_from_database(db_path, "genomics")
+        assert df.shape == (15, 8)
+        assert df.index.name == "sample_id"
+
+    def test_all_tables(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _create_test_db(db_path)
+        for table in ("genomics", "transcriptomics", "proteomics"):
+            df = load_from_database(db_path, table)
+            assert df.shape == (20, 10)
+
+    def test_missing_db_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="Database file not found"):
+            load_from_database(tmp_path / "nonexistent.db", "genomics")
+
+    def test_missing_index_col_raises(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _create_test_db(db_path)
+        with pytest.raises(ValueError, match="Index column"):
+            load_from_database(db_path, "genomics", index_col="nonexistent")
+
+    def test_non_numeric_columns_dropped(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        df = pd.DataFrame(
+            {
+                "sample_id": ["s1", "s2", "s3"],
+                "feat_0": [1.0, 2.0, 3.0],
+                "text_col": ["a", "b", "c"],
+            }
+        )
+        df.to_sql("mixed", conn, index=False, if_exists="replace")
+        conn.close()
+
+        result = load_from_database(db_path, "mixed")
+        assert "text_col" not in result.columns
+        assert "feat_0" in result.columns
+
+    def test_data_processable_through_pipeline(self, tmp_path):
+        """Data loaded from database can be processed through MultiOmicsPreprocessor."""
+        db_path = tmp_path / "test.db"
+        n = 25
+        _create_test_db(db_path, n_samples=n, n_features=30, seed=42)
+
+        genomics = load_from_database(db_path, "genomics")
+        transcriptomics = load_from_database(db_path, "transcriptomics")
+        proteomics = load_from_database(db_path, "proteomics")
+        labels = load_labels_from_database(db_path)
+
+        preprocessor = MultiOmicsPreprocessor(top_k_features=10)
+        matrices, y = preprocessor.fit_transform(
+            genomics, transcriptomics, proteomics, labels
+        )
+
+        assert matrices["genomics"].shape[0] == n
+        assert y.shape == (n,)
+        for mat in matrices.values():
+            assert mat.ndim == 2
+            assert mat.shape[1] <= 10
+
+
+class TestLoadLabelsFromDatabase:
+    def test_basic_load(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _create_test_db(db_path, n_samples=20)
+        labels = load_labels_from_database(db_path)
+        assert len(labels) == 20
+        assert labels.index.name == "sample_id"
+        assert set(labels.unique()).issubset({0, 1})
+
+    def test_missing_label_col_raises(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        _create_test_db(db_path)
+        with pytest.raises(ValueError, match="Label column"):
+            load_labels_from_database(db_path, label_col="nonexistent")

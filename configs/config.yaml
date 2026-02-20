@@ -12,6 +12,17 @@ data:
   val_size: 0.1
   random_seed: 42
 
+  # Optional: load data from a local SQLite database instead of CSV files
+  database:
+    enabled: false                      # Set to true to use database loading
+    db_path: "data/raw/omics.db"        # Path to SQLite database file
+    index_col: "sample_id"              # Column used as sample identifier
+    genomics_table: "genomics"          # Table name for genomics data
+    transcriptomics_table: "transcriptomics"  # Table name for transcriptomics
+    proteomics_table: "proteomics"      # Table name for proteomics data
+    labels_table: "labels"              # Table name for labels
+    label_col: "label"                  # Column name for the binary label
+
 graph:
   # Correlation threshold for constructing omics similarity edges
   correlation_threshold: 0.7

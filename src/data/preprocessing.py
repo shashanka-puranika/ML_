@@ -9,6 +9,7 @@ ready for graph construction.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -79,6 +80,19 @@ def load_labels(path: str | Path) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(name: str, kind: str = "identifier") -> None:
+    """Raise ``ValueError`` if *name* is not a safe SQL identifier."""
+    if not _SAFE_IDENTIFIER_RE.match(name):
+        raise ValueError(
+            f"Invalid SQL {kind}: {name!r}. "
+            "Only alphanumeric characters and underscores are allowed, "
+            "and the name must start with a letter or underscore."
+        )
+
+
 def load_from_database(
     db_path: str | Path,
     table_name: str,
@@ -105,10 +119,11 @@ def load_from_database(
     db_path = Path(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"Database file not found: {db_path}")
+    _validate_identifier(table_name, "table name")
 
     conn = sqlite3.connect(str(db_path))
     try:
-        df = pd.read_sql(f"SELECT * FROM [{table_name}]", conn)
+        df = pd.read_sql(f"SELECT * FROM [{table_name}]", conn)  # noqa: S608
     finally:
         conn.close()
 
@@ -166,10 +181,11 @@ def load_labels_from_database(
     db_path = Path(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"Database file not found: {db_path}")
+    _validate_identifier(table_name, "table name")
 
     conn = sqlite3.connect(str(db_path))
     try:
-        df = pd.read_sql(f"SELECT * FROM [{table_name}]", conn)
+        df = pd.read_sql(f"SELECT * FROM [{table_name}]", conn)  # noqa: S608
     finally:
         conn.close()
 

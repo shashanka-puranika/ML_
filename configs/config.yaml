@@ -1,0 +1,44 @@
+# Project configuration for AI-driven fungal pathogenicity prediction
+
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  # Multi-omics data file names expected in raw_dir
+  genomics_file: "genomics.csv"       # Gene presence/absence matrix or SNP profiles
+  transcriptomics_file: "transcriptomics.csv"  # Gene expression (RNA-seq counts)
+  proteomics_file: "proteomics.csv"   # Protein abundance profiles
+  labels_file: "labels.csv"           # Pathogenicity labels (0=non-pathogenic, 1=pathogenic)
+  test_size: 0.2
+  val_size: 0.1
+  random_seed: 42
+
+graph:
+  # Correlation threshold for constructing omics similarity edges
+  correlation_threshold: 0.7
+  # Number of top features to retain per omics layer
+  top_k_features: 500
+  # Inter-omics edge strategy: "correlation" or "pathway"
+  inter_omics_strategy: "correlation"
+
+model:
+  hidden_channels: 128
+  num_layers: 3
+  dropout: 0.3
+  heads: 4          # Number of attention heads (for GAT layers)
+  pooling: "mean"   # Graph-level pooling: "mean", "sum", or "max"
+
+training:
+  epochs: 200
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: 32
+  patience: 20      # Early stopping patience
+  checkpoint_dir: "checkpoints"
+
+evaluation:
+  metrics:
+    - "accuracy"
+    - "auroc"
+    - "auprc"
+    - "f1"
+    - "mcc"
